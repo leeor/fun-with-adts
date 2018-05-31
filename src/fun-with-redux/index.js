@@ -1,28 +1,71 @@
 /* eslint-disable no-unused-expressions */
 'use strict'
 
+// Imports {{{
+
 const pickBy_ = require('lodash/pickBy')
 const Type = require('union-type')
 
+// }}}
+
+// Helpers {{{
+
 const every = fn => array => array.every(fn)
+
+// }}}
+
+/* We'll create the basics of a connect panel, dealing with:
+ *
+ * 1. Initialising the app
+ * 2. Selecting a Dataset
+ * 3. Addind/removing bindings
+ */
+
+/* What if we were to create Redux Actions as ADTs?
+ * 
+ * We would be able to create a reducer that uses pattern matching instead of a switch case. But
+ * what else?
+ * 
+ * If we were to define an action using ADT we would also be able to type check the values it is
+ * created with.
+ * 
+ * So let's define some basic type we would later be able to use in our Action ADTs for validation:
+ * 
+ * - Collection Field
+ * - Component Property
+ * - Dataset
+ */
 
 const Field = Type({
   Field: { name: String, type: String }
 })
 
-const isArrayOfFields = every(
-  Field.prototype.isPrototypeOf.bind(Field.prototype)
-)
-
 const Prop = Type({
   Prop: { name: String, types: Array }
 })
 
-const isArrayOfProps = every(Prop.prototype.isPrototypeOf.bind(Prop.prototype))
+/* A dataset needs to validate an array of fields, lets define a little helper */
+
+const isArrayOfFields = every(
+  Field.prototype.isPrototypeOf.bind(Field.prototype)
+)
 
 const Dataset = Type({
   Dataset: { name: String, controllerRef: Object, fields: isArrayOfFields }
 })
+
+/* Actions!
+ * 
+ * We will define the following actions:
+ * 
+ * - InitApp: with component properties and available datasets
+ * - SelectDataset: the name of the chose one
+ * - ClearDataset: revert any previous selection
+ * - BindProp: bind a prop to a field
+ * - ClearProp: clear a property binding
+ */
+
+const isArrayOfProps = every(Prop.prototype.isPrototypeOf.bind(Prop.prototype))
 
 const isArrayOfDatasets = every(
   Dataset.prototype.isPrototypeOf.bind(Dataset.prototype)
@@ -33,8 +76,38 @@ const actions = Type({
   SelectDataset: { dataset: String },
   ClearDataset: [],
   BindProp: { prop: String, field: String },
-  ClearProp: []
+  ClearProp: { prop: String }
 })
+
+/* Ok. So we have some actions with validations.
+ * 
+ * What's next?
+ * 
+ * Let's see what the reducer would look like.
+ */
+
+const patternMatchingReducder = (state, action) =>
+  action.case({
+    InitApp: (props, datasets) =>
+      Object.assign({}, state, {
+        componentProperties: props,
+        availableDatasets: datasets.map(({ name }) => name),
+        datasetFields: datasets.reduce(
+          (acc, value) =>
+            Object.assign({}, acc, { [value.name]: value.fields }),
+          {}
+        )
+      }),
+    SelectDataset: dataset =>
+      Object.assign({}, state, {
+        selectedDataset: dataset
+      }),
+    ClearDataset: () => {},
+    BindProp: () => {},
+    ClearProp: () => {}
+  })
+
+/* Let's test it. We'll need some actions to throw at it. */
 
 const prop = Prop.PropOf({ name: 'value', types: ['Text', 'Number'] })
 
@@ -69,12 +142,56 @@ const selectDatasetAction = actions.SelectDatasetOf({
   dataset: 'Catalog'
 })
 
+/* and an initial state to work with */
+const initialState = {
+  componentProperties: [],
+  availableDatasets: [],
+  datasetFields: {},
+  selectedDataset: null,
+  bindings: {}
+}
+
+const initialisedAppState = patternMatchingReducder(initialState, initAppAction)
+initialisedAppState.componentProperties.map(({ name }) => name)
+initialisedAppState.availableDatasets
+Object.keys(initialisedAppState.datasetFields)
+initialisedAppState.datasetFields.Catalog.map(({ name }) => name)
+
+const selectedDatasetState = patternMatchingReducder(
+  initialisedAppState,
+  selectDatasetAction
+)
+selectedDatasetState.selectedDataset
+
+/* Awesome!
+ * 
+ * Can we take it a step further?
+ * 
+ * One of the side-effect of using Serial Effects is that we have more actions to deal with. There
+ * are actions that convey the results of side-effects, there are actions that implement state
+ * machines within the reducer (see the viewer app's save process).
+ * 
+ * Many times, however, not all actions can be sensibly dispatched at any given time. For example,
+ * most Dataset API methods are not available during the save process. Binding a property in the
+ * connect panel is not possible before a dataset was selected.
+ * 
+ * Can model these different "modes" of the application as an ADT???
+ */
+
+/* We'll begin with some helpers for validating each Mode instance */
+
+// App Mode helpers {{{
+
 const isEmptyArray = array => Array.isArray(array) && array.length === 0
 const isNonEmptyArray = array => Array.isArray(array) && array.length > 0
 const isEmptyObject = obj => Object.keys(obj).length === 0
 const isNonEmptyObject = obj => Object.keys(obj).length > 0
 const isNil = a => a === null
 const isNonNil = a => a !== null
+
+// }}}
+
+/* And now, the AppModes ADT */
 
 const AppModes = Type({
   Init: {
@@ -99,6 +216,8 @@ const AppModes = Type({
     bindings: () => true
   }
 })
+
+// Conversions {{{
 
 const firstMapped = (fn, array) => {
   return array.reduce((acc, value) => {
@@ -129,14 +248,6 @@ AppModes.appModeOf = state => {
   return firstMatchingMode[0]
 }
 
-const initialState = {
-  componentProperties: [],
-  availableDatasets: [],
-  datasetFields: {},
-  selectedDataset: null,
-  bindings: {}
-}
-
 AppModes.stateOf = mode => {
   return pickBy_(mode, (value, key) =>
     [
@@ -148,6 +259,10 @@ AppModes.stateOf = mode => {
     ].includes(key)
   )
 }
+
+// }}}
+
+// Mode Reducers {{{
 
 const initModeReducer = (state, action) => () => {
   return action.case({
@@ -179,6 +294,10 @@ const selectDatasetReducer = (state, action) => () => {
   })
 }
 
+// }}}
+
+// Reducer method {{{
+
 AppModes.prototype.reduce = function reduce(action) {
   const state = AppModes.stateOf(this)
   return this.case({
@@ -187,6 +306,8 @@ AppModes.prototype.reduce = function reduce(action) {
     BindingSelection: () => {}
   })
 }
+
+// }}}
 
 const reducer = (state, action) => {
   return AppModes.appModeOf(state).reduce(action)
